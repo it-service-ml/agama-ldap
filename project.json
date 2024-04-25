@@ -16,11 +16,9 @@
     "noDirectLaunch": [],
     "configs": {
         "org.gluu.agama.ldap.pw.main": {
-            "flowConfig" : {
-                "MAX_LOGIN_ATTEMPT": "6",
-                "ENABLE_LOCK": "true",
-                "LOCK_EXP_TIME": "180"
-            },
+            "MAX_LOGIN_ATTEMPT": "6",
+            "ENABLE_LOCK": "true",
+            "LOCK_EXP_TIME": "180",
             "serversConfig": [
                 {
                     "configId": "ad_1",
