@@ -1,5 +1,5 @@
 <p align="left">
-  <img width="600" height="400" src="https://github.com/GluuFederation/agama-ldap/assets/43112579/639a8ca4-7549-4167-a5eb-5fe19fad3ff5">
+  <img width="600" height="400" src="https://github.com/GluuFederation/agama-ldap/assets/6104200/492dd78e-0d04-4475-8cd9-211eec5f71e8">
 </p>
 
 [![Contributors][contributors-shield]](contributors-url)
