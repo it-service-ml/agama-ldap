@@ -45,10 +45,10 @@ public class JansLdapPasswordService extends PasswordService implements AutoClos
     private boolean lockAccount = false;
 
     private static transient HashMap<String, String> flowConfig;
-	private static transient List<GluuLdapConfiguration> ldapAuthConfigurations;
-	private static transient List<PersistenceEntryManager> persistenceEntryManagers;
+    private static transient List<GluuLdapConfiguration> ldapAuthConfigurations;
+    private static transient List<PersistenceEntryManager> persistenceEntryManagers;
 
-	private boolean useInternalLdapConfig;
+    private boolean useInternalLdapConfig;
 
     public JansLdapPasswordService(HashMap config) {
         logger.info("Flow config provided is  {}.", config);
