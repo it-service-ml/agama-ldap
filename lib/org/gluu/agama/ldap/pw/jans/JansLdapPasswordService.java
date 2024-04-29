@@ -2,39 +2,86 @@ package org.gluu.agama.ldap.pw.jans;
 
 import io.jans.agama.engine.service.FlowService;
 import io.jans.as.common.model.common.User;
+import io.jans.as.server.service.AppInitializer;
 import io.jans.as.server.service.AuthenticationService;
 import io.jans.as.server.service.UserService;
+import io.jans.model.GluuStatus;
+import io.jans.orm.PersistenceEntryManager;
 import io.jans.orm.model.base.CustomObjectAttribute;
 import io.jans.service.CacheService;
 import io.jans.service.cdi.util.CdiUtil;
+import io.jans.util.StringHelper;
+import io.jans.exception.ConfigurationException;
+import io.jans.model.ldap.GluuLdapConfiguration;
 import org.gluu.agama.ldap.pw.PasswordService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
 
-public class JansLdapPasswordService extends PasswordService {
+/**
+ * Agama LDAP authenticator
+ *
+ * @author Yuriy Movchan Date: 04/29/2024
+ */
+public class JansLdapPasswordService extends PasswordService implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(FlowService.class);
-    public static final String JANS_STATUS = "jansStatus";
-    public static final String INACTIVE = "inactive";
-    public static final String ACTIVE = "active";
-    public static final String CACHE_PREFIX = "lock_user_";
-    private static AuthenticationService authenticationService = CdiUtil.bean(AuthenticationService.class);
-    private static UserService userService = CdiUtil.bean(UserService.class);
-    private static CacheService cacheService = CdiUtil.bean(CacheService.class);
-    private String INVALID_LOGIN_COUNT_ATTRIBUTE = "jansCountInvalidLogin";
-    private int DEFAULT_MAX_LOGIN_ATTEMPT = 3;
-    private int DEFAULT_LOCK_EXP_TIME = 180;
 
-    private HashMap<String, String> flowConfig;
+    private static final String LOCK_CONFIG = "lockConfig";
+    private static final String SERVERS_CONFIG = "serversConfig";
+    
+    public static final String CACHE_PREFIX = "lock_user_";
+
+    private static final String INVALID_LOGIN_COUNT_ATTRIBUTE = "jansCountInvalidLogin";
+    private static final int DEFAULT_MAX_LOGIN_ATTEMPT = 3;
+    private static final int DEFAULT_LOCK_EXP_TIME = 180;
+
+    private String loginCountAttribute = INVALID_LOGIN_COUNT_ATTRIBUTE;
+    private int defaultMaxLoginAttempt = DEFAULT_MAX_LOGIN_ATTEMPT;
+    private int defaultLockExpTime = DEFAULT_LOCK_EXP_TIME;
+    private boolean lockAccount = false;
+
+    private static transient HashMap<String, String> flowConfig;
+	private static transient List<GluuLdapConfiguration> ldapAuthConfigurations;
+	private static transient List<PersistenceEntryManager> persistenceEntryManagers;
+
+	private boolean useInternalLdapConfig;
 
     public JansLdapPasswordService(HashMap config) {
         logger.info("Flow config provided is  {}.", config);
+        
+        boolean newConfig = flowConfig == null ? false : !config.equals(flowConfig);
         flowConfig = config;
-        System.out.println(flowConfig);
-        DEFAULT_MAX_LOGIN_ATTEMPT = flowConfig.get("MAX_LOGIN_ATTEMPT") != null ? Integer.parseInt(flowConfig.get("MAX_LOGIN_ATTEMPT")) : DEFAULT_MAX_LOGIN_ATTEMPT;
-        DEFAULT_LOCK_EXP_TIME = flowConfig.get("LOCK_EXP_TIME") != null ? Integer.parseInt(flowConfig.get("LOCK_EXP_TIME")) : DEFAULT_LOCK_EXP_TIME;
+
+        if (config.containsKey(LOCK_CONFIG)) {
+        	HashMap lockConfig = (HashMap) config.get(LOCK_CONFIG);
+        	defaultMaxLoginAttempt = (int) lockConfig.get("MAX_LOGIN_ATTEMPT");
+        	defaultLockExpTime = (int) lockConfig.get("LOCK_EXP_TIME");
+        	lockAccount = (boolean) lockConfig.get("ENABLE_ACCOUNT_LOCK");
+        }
+
+        if (containsNotEmptyBoolean(config, "useInternalLdapConfig")) {
+        	this.useInternalLdapConfig = (boolean) config.get("useInternalLdapConfig");
+        }
+
+        if (!this.useInternalLdapConfig && config.containsKey(SERVERS_CONFIG)) {
+        	List serversConfig = (List) config.get(SERVERS_CONFIG);
+        	if (!validateServerConf(serversConfig)) {
+        		throw new ConfigurationException("Servers configuration is invalid! Check the logs for more details.");
+        	}
+        	
+        	if (newConfig) {
+        		this.ldapAuthConfigurations = null;
+        		destroyLdapEntryManagers(this.persistenceEntryManagers);
+        	}
+            if (ldapAuthConfigurations == null) {
+            	this.ldapAuthConfigurations = createLdapExtendedConfigurations(serversConfig);
+            	this.persistenceEntryManagers = createLdapEntryManagers(ldapAuthConfigurations);
+            }
+        }
     }
 
     public JansLdapPasswordService() {
@@ -43,68 +90,258 @@ public class JansLdapPasswordService extends PasswordService {
     @Override
     public boolean validate(String username, String password) {
         logger.info("Validating user credentials.");
-        
-        boolean hasLogin = authenticationService.externalAuthenticate(username, password, true);
-        if (hasLogin && Boolean.valueOf(flowConfig.get("ENABLE_ACCOUNT_LOCK"))) {
+
+        UserService userService = CdiUtil.bean(UserService.class);
+        AuthenticationService authenticationService = CdiUtil.bean(AuthenticationService.class);
+
+        boolean loggedIn;
+        if (this.useInternalLdapConfig) {
+        	loggedIn = authenticationService.externalAuthenticate(username, password);
+        } else {
+        	loggedIn = authenticationService.externalAuthenticate(ldapAuthConfigurations, persistenceEntryManagers, username, password);
+        }
+
+        if (loggedIn && lockAccount) {
             logger.info("Credentials are valid and user account locked feature is activated");
             User currentUser = userService.getUser(username);
-            userService.setCustomAttribute(currentUser, INVALID_LOGIN_COUNT_ATTRIBUTE, 0);
+            userService.addUserAttribute(currentUser, loginCountAttribute, 0);
             userService.updateUser(currentUser);
             logger.info("Invalid login count reset to zero for {} .", username);
         }
-        return hasLogin;
+
+        return loggedIn;
     }
 
     @Override
     public String lockAccount(String username) {
-        User currentUser = userService.getUser(username);
+    	UserService userService = CdiUtil.bean(UserService.class);
+    	CacheService cacheService = CdiUtil.bean(CacheService.class);
+
+    	User currentUser = userService.getUser(username);
         int currentFailCount = 1;
-        String invalidLoginCount = getCustomAttribute(currentUser, INVALID_LOGIN_COUNT_ATTRIBUTE);
+        
+        String invalidLoginCount = getCustomAttribute(userService, currentUser, loginCountAttribute);
         if (invalidLoginCount != null) {
             currentFailCount = Integer.parseInt(invalidLoginCount) + 1;
         }
-        String currentStatus = getCustomAttribute(currentUser, JANS_STATUS);
+        
+        GluuStatus currentStatus = currentUser.getStatus();
         logger.info("Current user status is: {}", currentStatus);
-        if (currentFailCount < DEFAULT_MAX_LOGIN_ATTEMPT) {
-            int remainingCount = DEFAULT_MAX_LOGIN_ATTEMPT - currentFailCount;
+        
+        if (currentFailCount < defaultMaxLoginAttempt) {
+            int remainingCount = defaultMaxLoginAttempt - currentFailCount;
             logger.info("Remaining login count: {} for user {}", remainingCount, username);
-            if (remainingCount > 0 && currentStatus == "active") {
-                setCustomAttribute(currentUser, INVALID_LOGIN_COUNT_ATTRIBUTE, String.valueOf(currentFailCount));
+            if ((remainingCount > 0) && (GluuStatus.ACTIVE == currentStatus)) {
+                setCustomAttribute(userService, currentUser, loginCountAttribute, String.valueOf(currentFailCount));
                 logger.info("{}  more attempt(s) before account is LOCKED!", remainingCount);
             }
+            
             return "You have " + remainingCount + " more attempt(s) before your account is locked.";
         }
-        if (currentFailCount >= DEFAULT_MAX_LOGIN_ATTEMPT && currentStatus == "active") {
-            logger.info("Locking {} account for {} seconds.", username, DEFAULT_LOCK_EXP_TIME);
+        
+        if ((currentFailCount >= defaultMaxLoginAttempt) && (GluuStatus.ACTIVE == currentStatus)) {
+            logger.info("Locking {} account for {} seconds.", username, defaultLockExpTime);
             String object_to_store = "{'locked': 'true'}";
-            setCustomAttribute(currentUser, JANS_STATUS, INACTIVE);
-            cacheService.put(DEFAULT_LOCK_EXP_TIME, CACHE_PREFIX + username, object_to_store);
+            currentUser.setStatus(GluuStatus.INACTIVE);
+            cacheService.put(defaultLockExpTime, CACHE_PREFIX + username, object_to_store);
+            
             return "Your account have been locked.";
         }
-        if (currentFailCount >= DEFAULT_MAX_LOGIN_ATTEMPT && currentStatus == "inactive") {
+        
+        if ((currentFailCount >= defaultMaxLoginAttempt) && (GluuStatus.INACTIVE == currentStatus)) {
             logger.info("User {} account is already locked. Checking if we can unlock", username);
-            String cache_object = cacheService.get(CACHE_PREFIX + username);
+            String cache_object = (String) cacheService.get(CACHE_PREFIX + username);
             if (cache_object == null) {
                 logger.info("Unlocking user {} account", username);
-                setCustomAttribute(currentUser, JANS_STATUS, ACTIVE);
-                setCustomAttribute(currentUser, INVALID_LOGIN_COUNT_ATTRIBUTE, "0");
+                currentUser.setStatus(GluuStatus.ACTIVE);
+                setCustomAttribute(userService, currentUser, loginCountAttribute, "0");
+                
                 return "Your account  is now unlock. Try login ";
             }
 
         }
+        
         return null;
     }
 
-    private String getCustomAttribute(User user, String attributeName) {
+    private String getCustomAttribute(UserService userService, User user, String attributeName) {
         CustomObjectAttribute customAttribute = userService.getCustomAttribute(user, attributeName);
         if (customAttribute != null) {
-            return customAttribute.getValue();
+            return (String) customAttribute.getValue();
         }
+        
         return null;
     }
 
-    private User setCustomAttribute(User user, String attributeName, String value) {
+    private User setCustomAttribute(UserService userService, User user, String attributeName, String value) {
         userService.setCustomAttribute(user, attributeName, value);
         return userService.updateUser(user);
     }
+
+    private boolean validateServerConf(List<HashMap> serversConfig) {
+        boolean valid = true;
+
+        int idx = 1;
+    	for (HashMap serverConfig : serversConfig) {
+            if (!containsNotEmptyString(serverConfig, "configId")) {
+                logger.error("There is no 'configId' attribute in server configuration section #{}", idx);
+                return false;
+            }
+
+            String configId = (String) serverConfig.get("configId");
+
+            if (!containsNotEmptyList(serverConfig, "servers")) {
+                logger.error("Property 'servers' in configuration '{}' is invalid'", configId);
+                return false;
+            }
+
+            if (containsNotEmptyString(serverConfig, "bindDN")) {
+                if (!containsNotEmptyString(serverConfig, "bindPassword")) {
+                    logger.error("Property 'bindPassword' in configuration '{}' is invalid", configId);
+                    return false;
+                }
+            }
+
+            if (!containsNotEmptyBoolean(serverConfig, "useSSL")) {
+                logger.error("Property 'useSSL' in configuration '{}' is invalid", configId);
+                return false;
+            }
+
+            if (!containsNotEmptyInteger(serverConfig, "maxConnections")) {
+                logger.error("Property 'maxConnections' in configuration '{}' is invalid", configId);
+                return false;
+            }
+                
+            if (!containsNotEmptyList(serverConfig, "baseDNs")) {
+                logger.error("Property 'baseDNs' in configuration '{}' is invalid", configId);
+                return false;
+            }
+
+            if (!containsNotEmptyList(serverConfig, "loginAttributes")) {
+                logger.error("Property 'loginAttributes' in configuration '{}' is invalid", configId);
+                return false;
+            }
+
+            if (!containsNotEmptyList(serverConfig, "localLoginAttributes")) {
+                logger.error("Property 'localLoginAttributes' in configuration '{}' is invalid", configId);
+                return false;
+            }
+
+            if (((List) serverConfig.get("loginAttributes")).size() != ((List) serverConfig.get("localLoginAttributes")).size()) {
+                logger.error("The number of attributes in 'loginAttributes' and 'localLoginAttributes' isn't equal in configuration '{}'", configId);
+                return false;
+            }
+
+            idx++;
+    	}
+
+        return true;
+    }
+
+	private List<GluuLdapConfiguration> createLdapExtendedConfigurations(List<HashMap> serversConfig) {
+		List<GluuLdapConfiguration> resultConfigs = new ArrayList<>();
+    	for (HashMap serverConfig : serversConfig) {
+    		String configId = (String) serverConfig.get("configId");
+                    
+            List servers = (List) serverConfig.get("servers");
+
+            String bindDN = null;
+            String bindPassword = null;
+            boolean useAnonymousBind = true;
+            if (containsNotEmptyString(serverConfig, "bindDN")) {
+                useAnonymousBind = false;
+                bindDN = (String) serverConfig.get("bindDN");
+                bindPassword = (String) serverConfig.get("bindPassword");
+            }
+
+            boolean useSSL = (boolean) serverConfig.get("useSSL");
+            int maxConnections = (int ) serverConfig.get("maxConnections");
+            List baseDNs = (List) serverConfig.get("baseDNs");
+            List loginAttributes = (List) serverConfig.get("loginAttributes");
+            List localLoginAttributes = (List) serverConfig.get("localLoginAttributes");
+
+            GluuLdapConfiguration ldapConfiguration = new GluuLdapConfiguration();
+            ldapConfiguration.setConfigId(configId);
+            ldapConfiguration.setBindDN(bindDN);
+            ldapConfiguration.setBindPassword(bindPassword);
+            ldapConfiguration.setServersStringsList(servers);
+            ldapConfiguration.setMaxConnections(maxConnections);
+            ldapConfiguration.setUseSSL(useSSL);
+            ldapConfiguration.setBaseDNsStringsList(baseDNs);
+            ldapConfiguration.setPrimaryKey((String) loginAttributes.get(0));
+            ldapConfiguration.setLocalPrimaryKey((String) localLoginAttributes.get(0));
+            ldapConfiguration.setUseAnonymousBind(useAnonymousBind);
+            
+            resultConfigs.add(ldapConfiguration);
+    	}
+        
+        return resultConfigs;
+    }
+
+    private List<PersistenceEntryManager> createLdapEntryManagers(List<GluuLdapConfiguration> ldapAuthConfigurations) {
+    	AppInitializer appInitializer = CdiUtil.bean(AppInitializer.class);
+
+        List<PersistenceEntryManager> persistenceEntryManagers = new ArrayList<>(ldapAuthConfigurations.size());
+    	for (GluuLdapConfiguration ldapAuthConfiguration : ldapAuthConfigurations) {
+    		PersistenceEntryManager persistenceAuthEntryManager = appInitializer.createPersistenceAuthEntryManager(ldapAuthConfiguration);
+    		persistenceEntryManagers.add(persistenceAuthEntryManager);
+    	}
+    	
+    	return persistenceEntryManagers;
+    }
+
+	private void destroyLdapEntryManagers(List<PersistenceEntryManager> persistenceEntryManagers) {
+		AppInitializer appInitializer = CdiUtil.bean(AppInitializer.class);
+
+		appInitializer.closePersistenceEntryManagers(persistenceEntryManagers);
+	}
+        		
+    private boolean containsNotEmptyString(HashMap map, String property) {
+        if (map.containsKey(property)) {
+        	Object value = map.get(property);
+        	if (value instanceof String) {
+        		return StringHelper.isNotEmptyString((String) value);
+        	}
+        }
+        
+        return false;
+    }
+	
+	private boolean containsNotEmptyBoolean(HashMap map, String property) {
+		if (map.containsKey(property)) {
+			Object value = map.get(property);
+			return value instanceof Boolean;
+		}
+
+		return false;
+	}
+	
+	private boolean containsNotEmptyInteger(HashMap map, String property) {
+		if (map.containsKey(property)) {
+			Object value = map.get(property);
+			return value instanceof Integer;
+		}
+
+		return false;
+	}
+
+    private boolean containsNotEmptyList(HashMap map, String property) {
+        if (map.containsKey(property)) {
+        	Object value = map.get(property);
+        	if (value instanceof List) {
+        		return ((List) value).size() > 0;
+        	}
+        }
+        
+        return false;
+    }
+
+	@Override
+	public void close() throws Exception {
+        if (ldapAuthConfigurations == null) {
+    		this.ldapAuthConfigurations = null;
+    		destroyLdapEntryManagers(this.persistenceEntryManagers);
+        }
+	}
+
 }
