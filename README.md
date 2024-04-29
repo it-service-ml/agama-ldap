@@ -76,7 +76,13 @@ Below is a typical agama-ldap flow
 - LOCK_EXP_TIME: The time in seconds befor a locked account is unlock.
 - useInternalLdapConfig: Specify which LDAP configuration to use. `true` means that agama-ldap should use Jans Auth LDAP server configurations. `false` allow to specify LDAP configurations in `serverConfig` section.
 - serversConfig: One or more LDAP server configurations
-  
+
+## TUI sample settings:
+
+These are sample setting for `useInternalLdapConfig = true`:
+
+![tui_ldap_1](https://github.com/GluuFederation/agama-ldap/assets/6104200/a182873c-30c0-4584-bf5c-454d87b38b7b)
+![tui_ldap_2](https://github.com/GluuFederation/agama-ldap/assets/6104200/6da99409-ed98-43d8-b77b-5f8c47a18773)
 
 # License
 
