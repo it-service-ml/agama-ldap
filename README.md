@@ -30,24 +30,52 @@ This is the classic combined username / password form authentication workflow.
 The sequence diagram below shows the good flow.
 
 ![agama-ldap sequence diagram image](Agama-LDAP-PW-sequence.png)
-[Source](https://sequencediagram.org/index.html#initialData=C4S2BsFMAIEEHMCGBbRBaACgdWgCUQA4ECe0AYuAPYDuAULYgMbCUBO0BkrAzpQHa0CiVqEYghfYNABGrGty61IksKWqRp3MJEHDR4xJOgBJACIZa0ygFc+AE2GlE14AAtloxMB2CuvPmgAfGYYAFzQxJDcHFCICgB0iSbQ1IZSLNBU8CACIUGy8lzh1iB2APQE1ORsyL48-Ply1Aqs4YyskHbclk0tQSHhGADyAMoAKtWstXmBzm4eIIxekOEAbojgpcsAFCV2ADQc1ACUDC7uKkve-ebhAN4ARB3c1uDAD6EPL4yMUdwP+wAOnwHoxKHZIB9oAAmAAMsKBIOQf0Q8Eh4QeQwA0g8AL60GYFZpFaBDTh8MzQMEQnqFVhBdSabRtDbgaRMADWQA)
+[Source](https://sequencediagram.org/index.html#initialData=C4S2BsFMAIEEHMCGBbRBaACgdWgCUQA4ECe0AYuAPYDuAULYgMbCUBO0BkrAzpQHa0CiVqEYghfYNABGrGty61IksKWqRp3MJEHDR4xJOgBJACIZa0ygFc+AE2GlE14AAtloxMB0PgiaYgK0AAyprAY0ACMtL7+gTCh4dAATPScPPxoAHxmGABc0MSQ3BxQ8QB0lSbQ1IZSLNBU8CACudmy8lwF1iB2APQE1ORsyIJcvHztctQKrAWMrJB23JbTs9m5BRgA8gDKACrDrKNtWc5uHiCMXpAFAG6I4L03ABQ9dgA0HNQAlAwu7hU1282USEUi90ez28b16X0Gf3OgM8IKyYJSkKevkgsM+3x+0BAADNoNZZtA+JQpEjLsCltB+CEwuD6DSgTcNuYCgBvABEi241nAwF5eV5gsYjGK3F5HwAOnxeYxKHZIKKUgAGDXyxXIaWIeBqgq87YAaV5AF9aKcOjMutBtpw+GZoMrVatOqxsupNNp5o9wAFGABrIA)
 
 # Flow Configuration
 Below is a typical agama-ldap flow
   ```
-        {
-            "org.gluu.agama.ldap.pw.main": {
-                "flowConfig" : {
-                    "MAX_LOGIN_ATTEMPT": "6",
-                    "ENABLE_LOCK": "true",
-                    "LOCK_EXP_TIME": "180"
-                }
-            }
-        }
+{
+    "org.gluu.agama.ldap.pw.main": {
+        "lockConfig": {
+            "MAX_LOGIN_ATTEMPT": 6,
+            "ENABLE_LOCK": true,
+            "LOCK_EXP_TIME": 180
+        },
+        "useInternalLdapConfig": false,
+        "serversConfig": [
+            {
+                "configId": "ad_1",
+                "bindDN": "cn=directory manager",
+                "bindPassword": "encoded_password/plain_passowrd",
+                "servers": ["localhost:1389"],
+                "maxConnections": 3,
+                "useSSL": false,
+                "baseDNs": ["ou=people,o=jans"],
+                "loginAttributes": ["uid"],
+                "localLoginAttributes": ["uid"]
+             },
+             {
+                "configId": "ad_2",
+                "servers": ["localhost:2389"],
+                "bindDN": "cn=directory manager",
+                "bindPassword": "encoded_password/plain_passowrd",
+                "useSSL": false,
+                "maxConnections": 3,
+                "baseDNs": ["ou=people,o=jans"],
+                "loginAttributes": ["mail"],
+                "localLoginAttributes": ["mail"]
+             }
+         ]
+    }
+}
+
   ```
 - MAX_LOGIN_ATTEMPT: Is the maximum failed login attempt before the user account is locked
 - ENABLE_LOCK: true/false, this is use to enable the Account Lock feature
 - LOCK_EXP_TIME: The time in seconds befor a locked account is unlock.
+- useInternalLdapConfig: Specify which LDAP configuration to use. `true` means that agama-ldap should use Jans Auth LDAP server configurations. `false` allow to specify LDAP configurations in `serverConfig` section.
+- serversConfig: One or more LDAP server configurations
   
 
 # License
