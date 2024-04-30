@@ -25,7 +25,7 @@ count = Repeat 6 times max
           Finish it_aqzhf
      // Invalid credentials provided.
      Log "@error Invalid credentials provided"
-     When conf.ENABLE_LOCK is "true"
+     When conf.lockConfig.ENABLE_LOCK is "true"
           // Account lock feature is active.
           Log "@info Start account lock process"
           // Lock user account if needed or unlock if the expiration time  is over.
